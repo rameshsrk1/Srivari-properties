@@ -436,7 +436,138 @@ def page_backup_restore():
             f.write(up.getbuffer())
         st.success("Database restored. Please reload the app.")
         st.rerun()
+def page_ledger():
+    import itertools
+    st.title("📒 Tenant Ledger (Employee/Admin)")
 
+    # Backfill monthly charges to ensure ledger completeness
+    ensure_backfilled_charges_for_all()
+
+    # ---- Pick Tenant ----
+    c = conn()
+    tenants = pd.read_sql_query(
+        "SELECT id, name, rental_address, joining_date, opening_balance FROM tenants ORDER BY name", c
+    )
+    c.close()
+    if tenants.empty:
+        st.info("No tenants yet.")
+        return
+
+    tname = st.selectbox("Tenant", tenants["name"])
+    trow = tenants[tenants["name"] == tname].iloc[0]
+    tid = int(trow["id"])
+    joining_date = dt.date.fromisoformat(trow["joining_date"])
+    opening_balance = float(trow["opening_balance"] or 0)
+
+    # ---- Pull charges & payments ----
+    c = conn()
+    charges = pd.read_sql_query(
+        """
+        SELECT id, charge_date AS date, amount, COALESCE(note,'') AS note
+        FROM charges WHERE tenant_id=? ORDER BY date, id
+        """,
+        c, params=(tid,)
+    )
+    pays = pd.read_sql_query(
+        """
+        SELECT id, payment_date AS date, amount, COALESCE(mode,'') AS mode,
+               COALESCE(employee,'') AS employee, COALESCE(remarks,'') AS remarks
+        FROM payments WHERE tenant_id=? ORDER BY date, id
+        """,
+        c, params=(tid,)
+    )
+    c.close()
+
+    # ---- Build unified ledger events ----
+    events = []
+
+    # Opening balance as the very first event (acts like a charge)
+    events.append({
+        "date": joining_date.isoformat(),
+        "type": "Opening",
+        "description": "Opening Balance",
+        "debit": opening_balance,   # money owed
+        "credit": 0.0
+    })
+
+    # Charges -> Debit
+    for _, r in charges.iterrows():
+        events.append({
+            "date": r["date"],
+            "type": "Charge",
+            "description": r["note"] or "Monthly Rent",
+            "debit": float(r["amount"] or 0),
+            "credit": 0.0
+        })
+
+    # Payments -> Credit
+    for _, r in pays.iterrows():
+        desc = f"{r['mode']}".strip()
+        if r["employee"]:
+            desc += f" by {r['employee']}"
+        if r["remarks"]:
+            desc += f" — {r['remarks']}"
+        events.append({
+            "date": r["date"],
+            "type": "Payment",
+            "description": desc.strip() or "Payment",
+            "debit": 0.0,
+            "credit": float(r["amount"] or 0)
+        })
+
+    # Sort by date, then by type priority (Opening -> Charge -> Payment) to keep stable ordering on same date
+    type_order = {"Opening": 0, "Charge": 1, "Payment": 2}
+    events.sort(key=lambda e: (e["date"], type_order.get(e["type"], 9)))
+
+    # ---- Compute running net (payments - (opening + charges)) ----
+    running = []
+    net = 0.0
+    for e in events:
+        if e["type"] in ("Opening", "Charge"):
+            net -= e["debit"]
+        elif e["type"] == "Payment":
+            net += e["credit"]
+        running.append(net)
+
+    ledger_df = pd.DataFrame(events)
+    ledger_df["Running Net"] = running
+
+    # ---- Current month status ----
+    ym = dt.date.today().strftime("%Y-%m")
+    delayed = month_has_delay(tid, ym)
+    net_now = tenant_net_balance(tid)
+
+    st.markdown(
+        f"**Net Balance now:** {'🔴' if net_now < 0 else '🟢'} ₹{net_now:,.2f}  "
+        f"{'— 🟡 Current month not fully paid' if delayed else ''}"
+    )
+
+    # ---- Style: red for negative running balance ----
+    def style_row(row):
+        styles = []
+        for col in ledger_df.columns:
+            if col == "Running Net" and row["Running Net"] < 0:
+                styles.append("background-color: red; color: white;")
+            else:
+                styles.append("")
+        return styles
+
+    st.dataframe(
+        ledger_df[["date", "type", "description", "debit", "credit", "Running Net"]]
+        .rename(columns={
+            "date": "Date", "type": "Type", "description": "Description",
+            "debit": "Debit (₹)", "credit": "Credit (₹)"
+        })
+        .style.apply(style_row, axis=1),
+        use_container_width=True
+    )
+
+    # ---- Downloads ----
+    csv = ledger_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "⬇️ Download Ledger (CSV)", data=csv,
+        file_name=f"ledger_{tname.replace(' ', '_')}.csv", mime="text/csv"
+    )
 # ------------- Main -------------
 def main():
     st.set_page_config(page_title="Rent Collection System", page_icon="🏠", layout="wide")
@@ -462,6 +593,8 @@ def main():
         page_collect_rent()
     elif page == "Reports":
         page_reports()
+    elif page == "Ledger":
+        page_ledger()
     elif page == "Tenant Management":
         if user["role"] != "admin":
             st.error("Admin only"); return
