@@ -581,9 +581,9 @@ def main():
 
     st.sidebar.write(f"**User:** {user['username']} ({user['role']})")
     if user["role"] == "admin":
-        page = st.sidebar.radio("Navigate", ["Collect Rent", "Reports", "Tenant Management", "Backup & Restore"])
+        page = st.sidebar.radio("Navigate", ["Collect Rent", "Reports","Ledger","Tenant Management", "Backup & Restore"])
     else:
-        page = st.sidebar.radio("Navigate", ["Collect Rent", "Reports"])
+        page = st.sidebar.radio("Navigate", ["Collect Rent", "Reports","Ledger"])
 
     if st.sidebar.button("Logout"):
         st.session_state.clear()
