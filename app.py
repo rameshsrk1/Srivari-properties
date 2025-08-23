@@ -117,7 +117,7 @@ def page_login():
             st.session_state.logged_in = True
             st.session_state.username = user[1]
             st.session_state.role = user[3]
-            st.experimental_rerun()
+            st.rerun()
         else:
             st.error("Invalid username or password")
 
